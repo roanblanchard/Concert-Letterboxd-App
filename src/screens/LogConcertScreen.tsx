@@ -11,10 +11,12 @@ import {
   ActivityIndicator,
   Image,
 } from 'react-native';
+import * as Location from 'expo-location';
 import { mockArtists, mockVenues, mockFriends } from '../data/mockData';
 import { useConcerts } from '../store/ConcertsContext';
 import { searchITunesArtists } from '../services/itunes';
-import { Artist, Concert } from '../types';
+import { searchPhotonVenues, fetchNearbyVenues, Coordinates } from '../services/photon';
+import { Artist, Venue, Concert } from '../types';
 
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
@@ -23,42 +25,130 @@ function todayIso(): string {
 export default function LogConcertScreen() {
   const { addConcert } = useConcerts();
 
+  // Artist search state
   const [artistQuery, setArtistQuery] = useState('');
-  const [isSearching, setIsSearching] = useState(false);
-  const [searchResults, setSearchResults] = useState<Artist[]>([]);
+  const [isSearchingArtists, setIsSearchingArtists] = useState(false);
+  const [artistSearchResults, setArtistSearchResults] = useState<Artist[]>([]);
   const [selectedArtists, setSelectedArtists] = useState<Artist[]>([]);
 
-  const [selectedVenueId, setSelectedVenueId] = useState<string | null>(null);
+  // Venue location & search state
+  const [venueQuery, setVenueQuery] = useState('');
+  const [isSearchingVenues, setIsSearchingVenues] = useState(false);
+  const [venueSearchResults, setVenueSearchResults] = useState<Venue[]>([]);
+  const [selectedVenue, setSelectedVenue] = useState<Venue | null>(null);
+
+  const [userCoords, setUserCoords] = useState<Coordinates | null>(null);
+  const [nearbyVenues, setNearbyVenues] = useState<Venue[]>([]);
+  const [isLoadingNearby, setIsLoadingNearby] = useState(false);
+
+  // Concert details state
   const [date, setDate] = useState(todayIso());
   const [rating, setRating] = useState(0);
   const [selectedFriendIds, setSelectedFriendIds] = useState<string[]>([]);
   const [notes, setNotes] = useState('');
 
-  // Debounced iTunes live search
+  // Request location & fetch nearby music venues on mount
+  useEffect(() => {
+    let isMounted = true;
+
+    async function loadNearbyVenues() {
+      try {
+        setIsLoadingNearby(true);
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== 'granted') {
+          if (isMounted) setIsLoadingNearby(false);
+          return;
+        }
+
+        const location = await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.Balanced,
+        });
+
+        const coords: Coordinates = {
+          latitude: location.coords.latitude,
+          longitude: location.coords.longitude,
+        };
+
+        if (isMounted) {
+          setUserCoords(coords);
+        }
+
+        const venues = await fetchNearbyVenues(coords);
+        if (isMounted) {
+          if (venues.length > 0) {
+            setNearbyVenues(venues);
+          }
+          setIsLoadingNearby(false);
+        }
+      } catch (err) {
+        console.warn('Unable to get user location for nearby venues:', err);
+        if (isMounted) {
+          setIsLoadingNearby(false);
+        }
+      }
+    }
+
+    loadNearbyVenues();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  // Debounced iTunes live artist search
   useEffect(() => {
     const trimmed = artistQuery.trim();
     if (!trimmed) {
-      setSearchResults([]);
-      setIsSearching(false);
+      setArtistSearchResults([]);
+      setIsSearchingArtists(false);
       return;
     }
 
-    setIsSearching(true);
+    setIsSearchingArtists(true);
     const timeoutId = setTimeout(async () => {
       const results = await searchITunesArtists(trimmed);
-      setSearchResults(results);
-      setIsSearching(false);
+      setArtistSearchResults(results);
+      setIsSearchingArtists(false);
     }, 350);
 
     return () => clearTimeout(timeoutId);
   }, [artistQuery]);
 
+  // Debounced Photon live venue search with location biasing
+  useEffect(() => {
+    const trimmed = venueQuery.trim();
+    if (!trimmed) {
+      setVenueSearchResults([]);
+      setIsSearchingVenues(false);
+      return;
+    }
+
+    setIsSearchingVenues(true);
+    const timeoutId = setTimeout(async () => {
+      const results = await searchPhotonVenues(trimmed, 8, userCoords);
+      setVenueSearchResults(results);
+      setIsSearchingVenues(false);
+    }, 350);
+
+    return () => clearTimeout(timeoutId);
+  }, [venueQuery, userCoords]);
+
   const displayedArtists = useMemo(() => {
     if (artistQuery.trim().length > 0) {
-      return searchResults;
+      return artistSearchResults;
     }
     return mockArtists;
-  }, [artistQuery, searchResults]);
+  }, [artistQuery, artistSearchResults]);
+
+  const displayedVenues = useMemo(() => {
+    if (venueQuery.trim().length > 0) {
+      return venueSearchResults;
+    }
+    if (nearbyVenues.length > 0) {
+      return nearbyVenues;
+    }
+    return mockVenues;
+  }, [venueQuery, venueSearchResults, nearbyVenues]);
 
   function toggleArtist(artist: Artist) {
     setSelectedArtists((prev) => {
@@ -70,6 +160,10 @@ export default function LogConcertScreen() {
     });
   }
 
+  function selectVenue(venue: Venue) {
+    setSelectedVenue((prev) => (prev?.id === venue.id ? null : venue));
+  }
+
   function toggleFriend(id: string) {
     setSelectedFriendIds((prev) =>
       prev.includes(id) ? prev.filter((f) => f !== id) : [...prev, id]
@@ -78,9 +172,11 @@ export default function LogConcertScreen() {
 
   function resetForm() {
     setArtistQuery('');
-    setSearchResults([]);
+    setArtistSearchResults([]);
     setSelectedArtists([]);
-    setSelectedVenueId(null);
+    setVenueQuery('');
+    setVenueSearchResults([]);
+    setSelectedVenue(null);
     setDate(todayIso());
     setRating(0);
     setSelectedFriendIds([]);
@@ -92,7 +188,7 @@ export default function LogConcertScreen() {
       Alert.alert('Missing artist', 'Please select at least one artist.');
       return;
     }
-    if (!selectedVenueId) {
+    if (!selectedVenue) {
       Alert.alert('Missing venue', 'Please select a venue.');
       return;
     }
@@ -104,14 +200,14 @@ export default function LogConcertScreen() {
     const newConcert: Concert = {
       id: `c${Date.now()}`,
       artistIds: selectedArtists.map((a) => a.id),
-      venueId: selectedVenueId,
+      venueId: selectedVenue.id,
       date,
       rating,
       friendIds: selectedFriendIds,
       notes: notes.trim() || undefined,
     };
 
-    addConcert(newConcert, selectedArtists);
+    addConcert(newConcert, selectedArtists, selectedVenue);
     Alert.alert('Concert logged!', 'Your show has been added to your history.');
     resetForm();
   }
@@ -122,6 +218,7 @@ export default function LogConcertScreen() {
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       <Text style={styles.header}>Log a Concert</Text>
 
+      {/* Artists Section */}
       <Text style={styles.label}>Artist(s)</Text>
       <View style={styles.searchContainer}>
         <TextInput
@@ -132,7 +229,7 @@ export default function LogConcertScreen() {
           autoCapitalize="none"
           autoCorrect={false}
         />
-        {isSearching && (
+        {isSearchingArtists && (
           <ActivityIndicator size="small" color="#222" style={styles.searchSpinner} />
         )}
       </View>
@@ -163,7 +260,7 @@ export default function LogConcertScreen() {
         showsHorizontalScrollIndicator={false}
         style={styles.chipRow}
         ListEmptyComponent={
-          !isSearching && artistQuery.trim() ? (
+          !isSearchingArtists && artistQuery.trim() ? (
             <Text style={styles.emptyText}>No artists found.</Text>
           ) : null
         }
@@ -202,25 +299,78 @@ export default function LogConcertScreen() {
         }}
       />
 
-      <Text style={styles.label}>Venue</Text>
+      {/* Venue Section */}
+      <View style={styles.venueHeaderRow}>
+        <Text style={styles.label}>Venue</Text>
+        {!venueQuery.trim() && (
+          <Text style={styles.subLabel}>
+            {isLoadingNearby
+              ? 'Finding nearby venues...'
+              : nearbyVenues.length > 0
+              ? '📍 Nearby music venues'
+              : 'Popular venues'}
+          </Text>
+        )}
+      </View>
+      <View style={styles.searchContainer}>
+        <TextInput
+          style={[styles.input, styles.searchInput]}
+          placeholder="Search venues or cities..."
+          value={venueQuery}
+          onChangeText={setVenueQuery}
+          autoCapitalize="none"
+          autoCorrect={false}
+        />
+        {isSearchingVenues && (
+          <ActivityIndicator size="small" color="#222" style={styles.searchSpinner} />
+        )}
+      </View>
+
+      {/* Selected venue preview */}
+      {selectedVenue && (
+        <View style={styles.selectedSection}>
+          <Text style={styles.selectedLabel}>Selected Venue:</Text>
+          <View style={styles.selectedWrap}>
+            <TouchableOpacity
+              style={styles.selectedVenueChip}
+              onPress={() => setSelectedVenue(null)}
+            >
+              <Text style={styles.selectedVenueChipText}>
+                📍 {selectedVenue.name} ({selectedVenue.city}) ✕
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
+
+      {/* Venue search results / suggestions */}
       <FlatList
-        data={mockVenues}
+        data={displayedVenues}
         keyExtractor={(item) => item.id}
         horizontal
         showsHorizontalScrollIndicator={false}
         style={styles.chipRow}
-        renderItem={({ item }) => (
-          <TouchableOpacity
-            style={[styles.chip, selectedVenueId === item.id && styles.chipSelected]}
-            onPress={() => setSelectedVenueId(item.id)}
-          >
-            <Text
-              style={[styles.chipText, selectedVenueId === item.id && styles.chipTextSelected]}
+        ListEmptyComponent={
+          !isSearchingVenues && venueQuery.trim() ? (
+            <Text style={styles.emptyText}>No venues found.</Text>
+          ) : null
+        }
+        renderItem={({ item }) => {
+          const isSelected = selectedVenue?.id === item.id;
+          return (
+            <TouchableOpacity
+              style={[styles.venueCard, isSelected && styles.venueCardSelected]}
+              onPress={() => selectVenue(item)}
             >
-              {item.name}
-            </Text>
-          </TouchableOpacity>
-        )}
+              <Text style={[styles.venueName, isSelected && styles.venueNameSelected]}>
+                {item.name}
+              </Text>
+              <Text style={[styles.venueCity, isSelected && styles.venueCitySelected]}>
+                {item.city}
+              </Text>
+            </TouchableOpacity>
+          );
+        }}
       />
 
       <Text style={styles.label}>Date</Text>
@@ -285,6 +435,14 @@ const styles = StyleSheet.create({
   content: { paddingHorizontal: 16, paddingTop: 60, paddingBottom: 40 },
   header: { fontSize: 24, fontWeight: '700', marginBottom: 16 },
   label: { fontSize: 14, fontWeight: '600', color: '#444', marginTop: 16, marginBottom: 6 },
+  venueHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    justifyContent: 'space-between',
+    marginTop: 16,
+    marginBottom: 6,
+  },
+  subLabel: { fontSize: 12, color: '#777', fontWeight: '500' },
   searchContainer: { position: 'relative', justifyContent: 'center' },
   input: {
     borderWidth: 1,
@@ -300,13 +458,39 @@ const styles = StyleSheet.create({
   selectedLabel: { fontSize: 12, fontWeight: '600', color: '#666', marginBottom: 4 },
   selectedWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
   selectedChip: {
-    backgroundColor: '#1DB954',
+    backgroundColor: '#222',
     paddingHorizontal: 10,
     paddingVertical: 5,
     borderRadius: 14,
   },
   selectedChipText: { color: '#fff', fontSize: 13, fontWeight: '600' },
+  selectedVenueChip: {
+    backgroundColor: '#222',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 14,
+  },
+  selectedVenueChipText: { color: '#fff', fontSize: 13, fontWeight: '600' },
   chipRow: { marginTop: 8 },
+  venueCard: {
+    backgroundColor: '#f8f8f8',
+    borderWidth: 1,
+    borderColor: '#e2e2e2',
+    borderRadius: 14,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    marginRight: 8,
+    maxWidth: 220,
+    justifyContent: 'center',
+  },
+  venueCardSelected: {
+    backgroundColor: '#222',
+    borderColor: '#222',
+  },
+  venueName: { fontSize: 13, fontWeight: '600', color: '#222' },
+  venueNameSelected: { color: '#fff' },
+  venueCity: { fontSize: 11, color: '#777', marginTop: 2 },
+  venueCitySelected: { color: '#ccc' },
   artistCard: {
     flexDirection: 'row',
     alignItems: 'center',
