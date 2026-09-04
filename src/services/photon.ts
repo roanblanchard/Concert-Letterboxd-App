@@ -25,29 +25,6 @@ interface PhotonResponse {
   features: PhotonFeature[];
 }
 
-interface OverpassElement {
-  type: string;
-  id: number;
-  lat?: number;
-  lon?: number;
-  center?: {
-    lat: number;
-    lon: number;
-  };
-  tags?: {
-    name?: string;
-    'addr:city'?: string;
-    'addr:state'?: string;
-    'addr:country'?: string;
-    amenity?: string;
-    leisure?: string;
-  };
-}
-
-interface OverpassResponse {
-  elements: OverpassElement[];
-}
-
 export interface Coordinates {
   latitude: number;
   longitude: number;
@@ -115,89 +92,38 @@ export async function searchPhotonVenues(
 }
 
 /**
- * Queries OpenStreetMap Overpass API for nearby music venues, theatres, concert halls, and arenas within ~25km radius.
- * Falls back to Photon location-biased query if Overpass times out.
+ * Fetches nearby performance and music venues (theatres, arenas, music halls)
+ * using fast location-biased Photon queries.
  */
 export async function fetchNearbyVenues(
   coords: Coordinates,
-  radiusMeters = 25000,
   limit = 10
 ): Promise<Venue[]> {
-  const { latitude, longitude } = coords;
+  const categories = ['theater', 'amphitheatre', 'arena', 'music hall', 'ballroom', 'hall', 'venue'];
 
   try {
-    const overpassQuery = `
-      [out:json][timeout:8];
-      (
-        node["amenity"="music_venue"](around:${radiusMeters},${latitude},${longitude});
-        way["amenity"="music_venue"](around:${radiusMeters},${latitude},${longitude});
-        node["amenity"="theatre"](around:${radiusMeters},${latitude},${longitude});
-        way["amenity"="theatre"](around:${radiusMeters},${latitude},${longitude});
-        node["amenity"="arts_centre"](around:${radiusMeters},${latitude},${longitude});
-        way["amenity"="arts_centre"](around:${radiusMeters},${latitude},${longitude});
-        node["leisure"="stadium"](around:${radiusMeters},${latitude},${longitude});
-        way["leisure"="stadium"](around:${radiusMeters},${latitude},${longitude});
-      );
-      out center ${limit * 2};
-    `;
+    const results = await Promise.all(
+      categories.map((cat) => searchPhotonVenues(cat, 5, coords))
+    );
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 6000);
+    const merged: Venue[] = [];
+    const seen = new Set<string>();
 
-    const response = await fetch('https://overpass-api.de/api/interpreter', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: `data=${encodeURIComponent(overpassQuery)}`,
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeoutId);
-
-    if (response.ok) {
-      const data: OverpassResponse = await response.json();
-      const elements = data.elements ?? [];
-
-      const venues: Venue[] = [];
-      const seen = new Set<string>();
-
-      for (const el of elements) {
-        const name = el.tags?.name;
-        if (!name) continue;
-
-        const city =
-          [el.tags?.['addr:city'], el.tags?.['addr:state']].filter(Boolean).join(', ') ||
-          'Nearby';
-
-        const key = name.toLowerCase();
-        if (seen.has(key)) continue;
-        seen.add(key);
-
-        venues.push({
-          id: `osm_${el.type}_${el.id}`,
-          name,
-          city,
-        });
-
-        if (venues.length >= limit) break;
+    for (const list of results) {
+      for (const venue of list) {
+        const key = venue.name.trim().toLowerCase();
+        if (!seen.has(key)) {
+          seen.add(key);
+          merged.push(venue);
+        }
+        if (merged.length >= limit) break;
       }
-
-      if (venues.length > 0) {
-        return venues;
-      }
+      if (merged.length >= limit) break;
     }
+
+    return merged;
   } catch (err) {
-    console.warn('Overpass nearby query error / fallback to Photon:', err);
+    console.warn('Error fetching nearby venues via Photon:', err);
+    return [];
   }
-
-  // Fallback: Use Photon location bias with common venue terms
-  try {
-    const fallbackVenues = await searchPhotonVenues('theatre', limit, coords);
-    if (fallbackVenues.length > 0) return fallbackVenues;
-  } catch {
-    // Ignore and return empty
-  }
-
-  return [];
 }
