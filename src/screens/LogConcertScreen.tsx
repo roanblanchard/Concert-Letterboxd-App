@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   View,
   Text,
@@ -8,10 +8,13 @@ import {
   StyleSheet,
   ScrollView,
   Alert,
+  ActivityIndicator,
+  Image,
 } from 'react-native';
 import { mockArtists, mockVenues, mockFriends } from '../data/mockData';
 import { useConcerts } from '../store/ConcertsContext';
-import { Concert } from '../types';
+import { searchITunesArtists } from '../services/itunes';
+import { Artist, Concert } from '../types';
 
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
@@ -21,24 +24,50 @@ export default function LogConcertScreen() {
   const { addConcert } = useConcerts();
 
   const [artistQuery, setArtistQuery] = useState('');
-  const [selectedArtistIds, setSelectedArtistIds] = useState<string[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [searchResults, setSearchResults] = useState<Artist[]>([]);
+  const [selectedArtists, setSelectedArtists] = useState<Artist[]>([]);
+
   const [selectedVenueId, setSelectedVenueId] = useState<string | null>(null);
   const [date, setDate] = useState(todayIso());
   const [rating, setRating] = useState(0);
   const [selectedFriendIds, setSelectedFriendIds] = useState<string[]>([]);
   const [notes, setNotes] = useState('');
 
-  const filteredArtists = useMemo(() => {
-    if (!artistQuery.trim()) return mockArtists;
-    return mockArtists.filter((a) =>
-      a.name.toLowerCase().includes(artistQuery.trim().toLowerCase())
-    );
+  // Debounced iTunes live search
+  useEffect(() => {
+    const trimmed = artistQuery.trim();
+    if (!trimmed) {
+      setSearchResults([]);
+      setIsSearching(false);
+      return;
+    }
+
+    setIsSearching(true);
+    const timeoutId = setTimeout(async () => {
+      const results = await searchITunesArtists(trimmed);
+      setSearchResults(results);
+      setIsSearching(false);
+    }, 350);
+
+    return () => clearTimeout(timeoutId);
   }, [artistQuery]);
 
-  function toggleArtist(id: string) {
-    setSelectedArtistIds((prev) =>
-      prev.includes(id) ? prev.filter((a) => a !== id) : [...prev, id]
-    );
+  const displayedArtists = useMemo(() => {
+    if (artistQuery.trim().length > 0) {
+      return searchResults;
+    }
+    return mockArtists;
+  }, [artistQuery, searchResults]);
+
+  function toggleArtist(artist: Artist) {
+    setSelectedArtists((prev) => {
+      const exists = prev.some((a) => a.id === artist.id);
+      if (exists) {
+        return prev.filter((a) => a.id !== artist.id);
+      }
+      return [...prev, artist];
+    });
   }
 
   function toggleFriend(id: string) {
@@ -49,7 +78,8 @@ export default function LogConcertScreen() {
 
   function resetForm() {
     setArtistQuery('');
-    setSelectedArtistIds([]);
+    setSearchResults([]);
+    setSelectedArtists([]);
     setSelectedVenueId(null);
     setDate(todayIso());
     setRating(0);
@@ -58,7 +88,7 @@ export default function LogConcertScreen() {
   }
 
   function handleSubmit() {
-    if (selectedArtistIds.length === 0) {
+    if (selectedArtists.length === 0) {
       Alert.alert('Missing artist', 'Please select at least one artist.');
       return;
     }
@@ -73,7 +103,7 @@ export default function LogConcertScreen() {
 
     const newConcert: Concert = {
       id: `c${Date.now()}`,
-      artistIds: selectedArtistIds,
+      artistIds: selectedArtists.map((a) => a.id),
       venueId: selectedVenueId,
       date,
       rating,
@@ -81,43 +111,95 @@ export default function LogConcertScreen() {
       notes: notes.trim() || undefined,
     };
 
-    addConcert(newConcert);
+    addConcert(newConcert, selectedArtists);
     Alert.alert('Concert logged!', 'Your show has been added to your history.');
     resetForm();
   }
+
+  const selectedArtistIds = selectedArtists.map((a) => a.id);
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       <Text style={styles.header}>Log a Concert</Text>
 
       <Text style={styles.label}>Artist(s)</Text>
-      <TextInput
-        style={styles.input}
-        placeholder="Search artists..."
-        value={artistQuery}
-        onChangeText={setArtistQuery}
-      />
+      <View style={styles.searchContainer}>
+        <TextInput
+          style={[styles.input, styles.searchInput]}
+          placeholder="Search artists..."
+          value={artistQuery}
+          onChangeText={setArtistQuery}
+          autoCapitalize="none"
+          autoCorrect={false}
+        />
+        {isSearching && (
+          <ActivityIndicator size="small" color="#222" style={styles.searchSpinner} />
+        )}
+      </View>
+
+      {/* Selected artists pill list */}
+      {selectedArtists.length > 0 && (
+        <View style={styles.selectedSection}>
+          <Text style={styles.selectedLabel}>Selected ({selectedArtists.length}):</Text>
+          <View style={styles.selectedWrap}>
+            {selectedArtists.map((artist) => (
+              <TouchableOpacity
+                key={artist.id}
+                style={styles.selectedChip}
+                onPress={() => toggleArtist(artist)}
+              >
+                <Text style={styles.selectedChipText}>{artist.name} ✕</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </View>
+      )}
+
+      {/* Artist search results / suggestions */}
       <FlatList
-        data={filteredArtists}
+        data={displayedArtists}
         keyExtractor={(item) => item.id}
         horizontal
         showsHorizontalScrollIndicator={false}
         style={styles.chipRow}
-        renderItem={({ item }) => (
-          <TouchableOpacity
-            style={[styles.chip, selectedArtistIds.includes(item.id) && styles.chipSelected]}
-            onPress={() => toggleArtist(item.id)}
-          >
-            <Text
-              style={[
-                styles.chipText,
-                selectedArtistIds.includes(item.id) && styles.chipTextSelected,
-              ]}
+        ListEmptyComponent={
+          !isSearching && artistQuery.trim() ? (
+            <Text style={styles.emptyText}>No artists found.</Text>
+          ) : null
+        }
+        renderItem={({ item }) => {
+          const isSelected = selectedArtistIds.includes(item.id);
+          return (
+            <TouchableOpacity
+              style={[styles.artistCard, isSelected && styles.artistCardSelected]}
+              onPress={() => toggleArtist(item)}
             >
-              {item.name}
-            </Text>
-          </TouchableOpacity>
-        )}
+              {item.imageUrl ? (
+                <Image source={{ uri: item.imageUrl }} style={styles.artistImage} />
+              ) : (
+                <View style={styles.artistImagePlaceholder}>
+                  <Text style={styles.artistInitial}>{item.name.charAt(0)}</Text>
+                </View>
+              )}
+              <View style={styles.artistInfo}>
+                <Text
+                  style={[styles.artistName, isSelected && styles.artistNameSelected]}
+                  numberOfLines={1}
+                >
+                  {item.name}
+                </Text>
+                {item.genre && (
+                  <Text
+                    style={[styles.artistGenre, isSelected && styles.artistGenreSelected]}
+                    numberOfLines={1}
+                  >
+                    {item.genre}
+                  </Text>
+                )}
+              </View>
+            </TouchableOpacity>
+          );
+        }}
       />
 
       <Text style={styles.label}>Venue</Text>
@@ -203,6 +285,7 @@ const styles = StyleSheet.create({
   content: { paddingHorizontal: 16, paddingTop: 60, paddingBottom: 40 },
   header: { fontSize: 24, fontWeight: '700', marginBottom: 16 },
   label: { fontSize: 14, fontWeight: '600', color: '#444', marginTop: 16, marginBottom: 6 },
+  searchContainer: { position: 'relative', justifyContent: 'center' },
   input: {
     borderWidth: 1,
     borderColor: '#ddd',
@@ -211,8 +294,58 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     fontSize: 15,
   },
-  notesInput: { minHeight: 70, textAlignVertical: 'top' },
-  chipRow: { marginTop: 4 },
+  searchInput: { paddingRight: 36 },
+  searchSpinner: { position: 'absolute', right: 12 },
+  selectedSection: { marginTop: 10 },
+  selectedLabel: { fontSize: 12, fontWeight: '600', color: '#666', marginBottom: 4 },
+  selectedWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  selectedChip: {
+    backgroundColor: '#1DB954',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 14,
+  },
+  selectedChipText: { color: '#fff', fontSize: 13, fontWeight: '600' },
+  chipRow: { marginTop: 8 },
+  artistCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f8f8f8',
+    borderWidth: 1,
+    borderColor: '#e2e2e2',
+    borderRadius: 24,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    marginRight: 8,
+    maxWidth: 220,
+  },
+  artistCardSelected: {
+    backgroundColor: '#222',
+    borderColor: '#222',
+  },
+  artistImage: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    marginRight: 8,
+    backgroundColor: '#eee',
+  },
+  artistImagePlaceholder: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    marginRight: 8,
+    backgroundColor: '#ddd',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  artistInitial: { fontSize: 14, fontWeight: '700', color: '#555' },
+  artistInfo: { flexShrink: 1 },
+  artistName: { fontSize: 13, fontWeight: '600', color: '#222' },
+  artistNameSelected: { color: '#fff' },
+  artistGenre: { fontSize: 11, color: '#777', marginTop: 1 },
+  artistGenreSelected: { color: '#ccc' },
+  emptyText: { fontSize: 13, color: '#888', fontStyle: 'italic', paddingVertical: 8 },
   chip: {
     borderWidth: 1,
     borderColor: '#ccc',
@@ -226,12 +359,13 @@ const styles = StyleSheet.create({
   chipTextSelected: { color: '#fff' },
   starsRow: { flexDirection: 'row' },
   star: { fontSize: 30, marginRight: 6 },
+  notesInput: { minHeight: 70, textAlignVertical: 'top' },
   submitButton: {
     backgroundColor: '#222',
-    borderRadius: 10,
+    borderRadius: 8,
     paddingVertical: 14,
     alignItems: 'center',
-    marginTop: 28,
+    marginTop: 24,
   },
   submitButtonText: { color: '#fff', fontSize: 16, fontWeight: '700' },
 });
